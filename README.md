@@ -1,6 +1,8 @@
+
 ПЗПІ-23-7
 
 Тимбота Гліб
 
-Мова програмування: TypeScript
-Методи: 106 - Hide Delegate, 117 - Replace Data Value with Object, 138 - Encapsulate Collection.
+Правила оформлення програмного коду TypeScript за Google TypeScript Style Guide
+
+Методи "Приховати делегата", "Замінити значення даних об'єктом", "Інкапсулювати колекцію" у мові TypeScript за Google TypeScript Style Guide.
