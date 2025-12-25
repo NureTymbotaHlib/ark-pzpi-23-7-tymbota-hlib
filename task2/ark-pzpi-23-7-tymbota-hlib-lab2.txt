@@ -1,0 +1,298 @@
+Міністерство освіти і науки України
+Харківський національний університет радіоелектроніки
+Кафедра програмної інженерії
+
+
+
+Звіт
+з лабораторної роботи №2
+з дисципліни «Аналіз та рефакторінг коду»
+на тему: «Розробка бази даних для серверної частини програмної системи та прикладного програмного інтерфейсу (API)»
+
+
+
+
+
+
+Виконав:                                                                      Перевірив:
+ст. гр. ПЗПІ 23-7                                                         Дашенков Д. С.
+Тимбота Гліб Олексійович                                             
+                                                                       
+
+
+
+
+
+Харків 2025
+     2.1 Мета роботи:
+     Ознайомитися з процесом розробки серверної частини програмної системи, включаючи проектування бази даних (БД), розробку API для взаємодії з клієнтами, та перевірку (тестування) їхньої взаємодії. Оволодіти методами проектування діаграм UML та ER, розробки БД, програмної реалізації API, а також роботи з репозиторіями Git та створення технічної документації.
+     2.2 Хід роботи
+     2.2.1 Будова програмної системи
+     Клієнтська частина: включає веб-версію для водія (клієнта) і страхового агента. Водій може реєструватися, оформлювати та переглядати поліси, подавати заяву про ДТП і відстежувати статус страхового випадку. Агент може створювати поліси для клієнтів, редагувати дані клієнтів та переглядати статистику продажів.
+     Серверна частина: забезпечує авторизацію користувачів, обробку бізнес-операцій автострахування (поліси, платежі, страхові випадки), прийом та збереження телематичних даних, а також функції керування користувачами й ролями та налаштування тарифів/коефіцієнтів. Сервер надає REST API для взаємодії клієнтських застосунків із базою даних.
+     База даних: зберігає інформацію про клієнтів, транспортні засоби, поліси, платежі, страхові випадки та телематичні події (TelemetryEvent).
+     IoT-компонента: для демонстрації надходження телеметрії використовується симулятор Wokwi (ESP32), який надсилає телематичні події на сервер через API.
+     Адміністративні функції: адміністратор переглядає системну статистику, керує користувачами та ролями, менеджер з врегулювання реєструє випадки та приймає рішення щодо виплати, а також переглядає телематичні дані.
+     
+     2.2.2 Створення UML діаграми прецедентів для серверної частини системи
+     Для опису взаємодії користувачів із серверною частиною системи автострахування було розроблено UML діаграму прецедентів. На діаграмі виділено таких основних акторів:
+	Водій (клієнт) – реєструється в системі, переглядає свої транспортні засоби та поліси, оформлює або продовжує страховий договір, подає заяву про настання страхового випадку та відстежує статус розгляду справи.
+	Страховий агент – створює та редагує профілі клієнтів, оформлює поліси від їхнього імені, коригує умови договорів, переглядає власний портфель полісів та статистику продажів.
+	Менеджер з врегулювання збитків – реєструє нові страхові випадки, переглядає деталі ДТП і телематичні дані, приймає рішення щодо виплати відшкодування та оновлює статус справ.
+	Адміністратор системи – керує користувачами та ролями, налаштовує тарифні коефіцієнти, має доступ до загальної статистики системи та технічних параметрів.
+	Основні прецеденти, реалізовані на діаграмі, включають: «Авторизація користувача», «Реєстрація клієнта», «Оформлення поліса», «Продовження поліса», «Перегляд списку полісів», «Подання заяви про ДТП», «Перегляд статусу страхового випадку», «Реєстрація та обробка страхового випадку», «Керування тарифами» та «Адміністрування користувачів». Дана діаграма відображає ключові сценарії використання серверної частини та слугує основою для подальшого проектування API та моделі даних.
+
+
+     
+     
+     
+     
+     
+     
+     
+     
+     
+     
+     
+     
+
+Рисунок 2.1 – Use case діаграма серверної частини системи автострахування
+     2.2.3 Створення ERдіаграми
+     На основі вимог, сформульованих у документі Vision & Scope, було виділено такі основні сутності: Client, Vehicle, Policy, Claim, TelemetryEvent, User, Payment. Для кожної сутності визначено ключові атрибути та зв’язки між ними. На ERдіаграмі показано, що один клієнт може мати кілька транспортних засобів і полісів, кожен поліс пов’язаний із конкретним клієнтом і транспортним засобом, а також має пов’язані страхові випадки та платежі. Дані телеметрії з OBD/GPSпристроїв зберігаються у вигляді окремих подій і пов’язані з транспортними засобами. Користувачі системи (агенти, менеджери, адміністратори) відображені окремою сутністю User і асоціюються з полісами та заявами, які вони створюють або обробляють.
+
+Рисунок 2.2 – ERдіаграма бази даних системи автострахування
+     2.2.4 Розробка бази даних програмної системи
+          На основі ER-діаграми спроєктовано структуру бази даних для зберігання інформації про клієнтів, транспортні засоби, поліси, платежі, страхові випадки та телематичні події. Кожна сутність представлена окремою таблицею, а зв’язки реалізуються через зовнішні ключі (FK), що забезпечує цілісність даних і підтримку нормалізованої структури.
+     У роботі використовується NoSQL СУБД MongoDB, тому класична реляційна нормалізація застосовується як принцип проектування структури даних та мінімізації надлишкового дублювання. Дані зберігаються у колекціях, а зв’язки реалізуються через посилання за ідентифікаторами сутностей, що відповідає логіці 3NF у реляційній моделі.
+     1NF: усі значення атрибутів є атомарними, без повторюваних груп. У колекціях users/clients/vehicles/policies/payments/claims/telemetry_events кожне поле зберігає одне значення відповідного типу (число/рядок/дата/логічне значення). Масиви не використовуються для зберігання повторюваних табличних груп.
+     2NF: у зв’язках типу 1:N дані, що належать до іншої сутності, не дублюються в документі. Наприклад, дані клієнта не дублюються в policies, а використовуються через client_id; дані авто не дублюються в policies, а використовуються через vehicle_id; платежі не зберігаються всередині policy, а винесені в payments з посиланням policy_id.
+     3NF: неключові атрибути залежать лише від ключа своєї сутності, а похідні/узагальнені дані не дублюються в різних колекціях без необхідності. Наприклад, інформація про користувача зберігається тільки в users; інформація про клієнта — тільки в clients; інформація про страховий випадок — тільки в claims. Для пришвидшення вибірок використовуються індекси/унікальні обмеження, але без дублювання пов’язаних об’єктів.
+     Для взаємодії серверної частини з базою даних MongoDB використано ODM Mongoose. Mongoose виконує роль аналога ORM для NoSQL: дозволяє описувати схеми/моделі колекцій, виконувати валідацію даних, формувати запити та реалізовувати CRUD-операції через інтерфейс моделей. Для кожної сутності предметної області створено окрему модель, що відповідає структурі даних, визначеній ER-діаграмою.
+     Код створення схем для MongoDB наведено у Додатку А.
+	
+     2.2.5 Створити діаграму структури БД
+     Діаграма структури бази даних деталізує фізичну організацію зберігання даних: перелік таблиць, первинні ключі (PK), зовнішні ключі (FK), а також основні обмеження цілісності. На відміну від ER-діаграми, дана діаграма акцентує увагу на тому, які саме поля є ключовими та як реалізуються зв’язки між таблицями.
+У межах проєкту використовуються такі таблиці: Client, Vehicle, User, Policy, Payment, Claim, TelemetryEvent. Основні зв’язки:
+* Client 1..* Vehicle (клієнт володіє кількома авто)
+* Client 1..* Policy, Vehicle 1..* Policy (поліс оформлюється для конкретного клієнта і конкретного авто)
+* Policy 1..* Payment (у поліса може бути кілька платежів)
+* Policy 1..* Claim (по полісу можуть реєструватися страхові випадки)
+* Vehicle 1..* TelemetryEvent (авто генерує телематичні події)
+* User 1..* Policy (користувач системи може створювати поліси для клієнта)
+* User 1..* Claim (менеджер з врегулювання обробляє страхові випадки)
+Для забезпечення цілісності даних передбачені обмеження:
+* унікальність email для User і (за потреби) Client;
+* унікальність vin для Vehicle;
+* унікальність policy_number для Policy;
+* використання FK для зв’язків між таблицями (client_id, vehicle_id, policy_id, created_by_user_id, handler_user_id, reported_by_client_id);
+* рекомендовано застосовувати RESTRICT/NO ACTION при видаленні записів, які мають залежні дані (наприклад, не видаляти Policy, якщо існують Payment або Claim).
+
+Рисунок 2.3 – Діаграма структури БД
+     2.2.6 Розробити API для взаємодії серверної частини з клієнтами.
+     Для взаємодії клієнтських застосунків із серверною частиною розробляється REST API. Доступ до ендпоінтів обмежується ролями користувачів відповідно до моделі User.role: Admin, Agent, Manager, Driver. API покриває основні бізнес-сценарії (оформлення/продовження поліса, подання та обробка страхового випадку, облік платежів, робота з даними клієнта й авто, прийом телеметрії). Для операцій видалення використовується підхід soft delete (деактивація/архівація записів), щоб зберегти історичні дані щодо полісів, платежів та страхових випадків.
+Auth (усі ролі)
+POST /api/auth/register — реєстрація користувача
+POST /api/auth/login — авторизація користувача
+GET /api/auth/me — поточний користувач
+Clients (Driver/Agent)
+POST /api/clients — реєстрація клієнта
+GET /api/clients/:id — перегляд даних клієнта
+PATCH /api/clients/:id — редагування даних клієнта
+Vehicles (Driver/Agent)
+POST /api/vehicles — додати авто клієнта
+GET /api/vehicles/:id — перегляд авто
+PATCH /api/vehicles/:id — редагувати авто
+DELETE /api/vehicles/:id — деактивація авто (soft delete)
+Policies (Driver/Agent)
+POST /api/policies — оформлення поліса
+GET /api/policies/my — перегляд своїх полісів (Driver)
+GET /api/policies/:id — деталі поліса
+PATCH /api/policies/:id/renew — продовження поліса
+DELETE /api/policies/:id — скасування поліса (або архівація/закриття)
+Policies (Agent)
+POST /api/policies/create-for-client — створення поліса для клієнта (Agent)
+Payments (Driver/Agent)
+POST /api/payments — створити платіж за полісом
+GET /api/policies/:id/payments — перегляд платежів по полісу
+Claims (Driver)
+POST /api/claims — подання заяви про ДТП
+GET /api/claims/:id/status — перегляд статусу страхового випадку
+Claims (Manager)
+POST /api/claims/:id/register — реєстрація/прийняття в роботу страхового випадку
+PATCH /api/claims/:id/decision — прийняття рішення щодо виплати (approve/reject, сума)
+GET /api/claims/:id — перегляд деталей страхового випадку
+Telemetry (Driver/Manager)
+POST /api/telemetry-events — запис телематичної події (IoT-клієнт/симуляція)
+GET /api/telemetry-events?vehicleId= — перегляд телематичних даних
+Sales statistics (Agent)
+GET /api/reports/sales — перегляд статистики продажів
+Admin (Admin)
+PATCH /api/admin/users/:id/role — керування користувачами та ролями
+GET /api/admin/statistics — перегляд системної статистики
+PUT /api/admin/tariffs — налаштування тарифів та коефіцієнтів.
+DELETE /api/admin/users/:id — блокування/деактивація користувача (soft delete)
+	2.2.7 Специфікація API
+     Для документування API використано специфікацію OpenAPI (Swagger). Документація доступна через Swagger UI за шляхом /api/docs/ та містить опис ендпоінтів, параметрів, кодів відповідей і схем даних основних сутностей (Client, Vehicle, Policy, Payment, Claim, TelemetryEvent). Swagger UI використовується для перевірки запитів через «Try it out».
+
+Рисунок 2.4 – Частина документації в Swagger
+
+Рисунок 2.5 – Демонстрація запиту статистики від адміна
+
+Рисунок 2.6 – Демонстрація отримання інформації про страховий поліс із policy_id = 1
+Код на створення програмної реалізації та розробленого API та функцій роботи з БД доступний за посиланням:
+
+     2.3 Висновок
+     У межах лабораторної роботи було спроєктовано серверну частину ПС та структуру зберігання даних відповідно до ER-діаграми предметної області. Для NoSQL СУБД MongoDB сформовано набір колекцій і моделей даних, а для доступу до БД використано ODM Mongoose. Також визначено тип API (REST) і описано основні ендпоінти для взаємодії клієнтів із сервером, включно з операціями створення, читання та оновлення даних, а також soft delete для окремих сутностей. Для документування API використано OpenAPI (Swagger) з групуванням ендпоінтів за логічними модулями. Отримана структура та документація створюють основу для подальшого розширення бізнес-логіки та повної реалізації функціоналу системи.
+
+
+ДОДАТОК А
+Код на створення Mongo DB моделей
+User.js
+const mongoose = require('mongoose')
+
+const UserSchema = new mongoose.Schema(
+    {
+        user_id: { type: Number, required: true, unique: true },
+        role: { type: String, enum: ['Admin', 'Agent', 'Manager', 'Driver'], required: true },
+        full_name: { type: String, required: true },
+        email: { type: String, required: true, unique: true },
+        password_hash: { type: String, required: true },
+        created_at: { type: Date, default: Date.now },
+        updated_at: { type: Date, default: Date.now }
+    },
+    { collection: 'users' }
+)
+
+module.exports = mongoose.model('User', UserSchema)
+Vehicle.js
+const mongoose = require('mongoose')
+
+const VehicleSchema = new mongoose.Schema(
+    {
+        vehicle_id: { type: Number, required: true, unique: true },
+        client_id: { type: Number, required: true }, // FK -> clients.client_id
+        vin: { type: String, required: true, unique: true },
+        plate_number: { type: String, required: true },
+        make: { type: String, required: true },
+        model: { type: String, required: true },
+        year: { type: Number, required: true },
+        engine_capacity: { type: Number },
+        fuel_type: { type: String },
+        created_at: { type: Date, default: Date.now },
+        updated_at: { type: Date, default: Date.now }
+    },
+    { collection: 'vehicles' }
+)
+
+module.exports = mongoose.model('Vehicle', VehicleSchema)
+
+Policy.js
+const mongoose = require('mongoose')
+
+const PolicySchema = new mongoose.Schema(
+    {
+        policy_id: { type: Number, required: true, unique: true },
+        client_id: { type: Number, required: true }, // FK -> clients.client_id
+        vehicle_id: { type: Number, required: true }, // FK -> vehicles.vehicle_id
+        policy_number: { type: String, required: true, unique: true },
+        type: { type: String, enum: ['OSCPV', 'CASCO'], required: true },
+        start_date: { type: Date, required: true },
+        end_date: { type: Date, required: true },
+        status: { type: String, enum: ['Draft', 'Active', 'Expired', 'Cancelled'], required: true },
+        base_premium: { type: Number, required: true },
+        final_premium: { type: Number, required: true },
+        tariff_plan: { type: String, required: true },
+        created_by_user_id: { type: Number, required: true }, // FK -> users.user_id
+        created_at: { type: Date, default: Date.now },
+        updated_at: { type: Date, default: Date.now }
+    },
+    { collection: 'policies' }
+)
+
+module.exports = mongoose.model('Policy', PolicySchema)
+Payment.js
+const mongoose = require('mongoose')
+
+const PaymentSchema = new mongoose.Schema(
+    {
+        payment_id: { type: Number, required: true, unique: true },
+        policy_id: { type: Number, required: true }, // FK -> policies.policy_id
+        amount: { type: Number, required: true },
+        currency: { type: String, required: true },
+        payment_date: { type: Date, required: true },
+        payment_method: { type: String, required: true },
+        status: { type: String, enum: ['Pending', 'Paid', 'Failed', 'Refunded'], required: true },
+        created_at: { type: Date, default: Date.now }
+    },
+    { collection: 'payments' }
+)
+
+module.exports = mongoose.model('Payment', PaymentSchema)
+Client.js
+const mongoose = require('mongoose')
+
+const ClientSchema = new mongoose.Schema(
+    {
+        client_id: { type: Number, required: true, unique: true },
+        full_name: { type: String, required: true },
+        email: { type: String, required: true },
+        phone: { type: String, required: true },
+        date_of_birth: { type: Date, required: true },
+        driver_license_number: { type: String, required: true },
+        created_at: { type: Date, default: Date.now },
+        updated_at: { type: Date, default: Date.now }
+    },
+    { collection: 'clients' }
+)
+
+module.exports = mongoose.model('Client', ClientSchema)
+Claim.js
+const mongoose = require('mongoose')
+
+const ClaimSchema = new mongoose.Schema(
+    {
+        claim_id: { type: Number, required: true, unique: true },
+        policy_id: { type: Number, required: true }, // FK -> policies.policy_id
+        reported_by_client_id: { type: Number, required: true }, // FK -> clients.client_id
+        handler_user_id: { type: Number, required: true }, // FK -> users.user_id (Manager)
+        event_time: { type: Date, required: true },
+        location_lat: { type: Number },
+        location_lng: { type: Number },
+        description: { type: String, required: true },
+        status: { type: String, enum: ['Created', 'InReview', 'Approved', 'Rejected', 'Paid'], required: true },
+        estimated_damage: { type: Number },
+        approved_payout: { type: Number },
+        created_at: { type: Date, default: Date.now },
+        updated_at: { type: Date, default: Date.now }
+    },
+    { collection: 'claims' }
+)
+
+module.exports = mongoose.model('Claim', ClaimSchema)
+TelemetryEvent.js
+const mongoose = require('mongoose')
+
+const TelemetryEventSchema = new mongoose.Schema(
+    {
+        event_id: { type: Number, required: true, unique: true },
+        vehicle_id: { type: Number, required: true }, // FK -> vehicles.vehicle_id
+        timestamp: { type: Date, required: true },
+        speed: { type: Number },
+        engine_rpm: { type: Number },
+        acceleration: { type: Number },
+        braking_flag: { type: Boolean },
+        impact_flag: { type: Boolean },
+        latitude: { type: Number },
+        longitude: { type: Number }
+    },
+    { collection: 'telemetry_events' }
+)
+
+module.exports = mongoose.model('TelemetryEvent', TelemetryEventSchema)
+
+
+ДОДАТОК Б
+Посилання на відео https://youtu.be/HiaFZfQpPt8 
+Посилання на гітхаб https://github.com/NureTymbotaHlib/ark-pzpi-23-7-tymbota-hlib.git 
+
+
