@@ -1,0 +1,709 @@
+Міністерство освіти і науки України
+Харківський національний університет радіоелектроніки
+Кафедра програмної інженерії
+
+
+
+Звіт
+з лабораторної роботи №3
+з дисципліни «Аналіз та рефакторінг коду»
+на тему: «Розробка бізнес логіки та функцій адміністрування серверної частини системи»
+
+
+
+
+
+
+Виконав:                                                                      Перевірив:
+ст. гр. ПЗПІ 23-7                                                         Дашенков Д. С.
+Тимбота Гліб Олексійович                                             
+                                                                       
+
+
+
+
+
+Харків 2025
+     3.1 Мета роботи
+     Ознайомитися з процесом розробки бізнес логіки та функцій адміністрування серверної частини програмної системи. Отримати практичні навички реалізації бізнес логіки, функцій адміністрування, створення UML-діаграм діяльності та взаємодії, а також перевірки (тестування) роботи серверної частини.
+     3.2 Архітектурні рішення
+     Серверна частина програмної системи AutoInsuranceServer побудована на платформі Node.js із використанням фреймворку Express та бази даних MongoDB через бібліотеку Mongoose. Архітектура застосунку має трирівневу структуру — Controller–Service–Repository, що забезпечує чітке розділення відповідальностей між прийомом запитів, виконанням бізнес-логіки та роботою з даними.
+* Контролери (Controllers) — приймають HTTP-запити від клієнтів, перевіряють вхідні дані та викликають відповідні методи сервісів.
+* Сервіси (Services) — містять реалізацію бізнес-правил предметної області автострахування: активацію полісів після оплати, обробку страхових випадків, визначення критичних подій телеметрії, контроль ролей користувачів.
+* Моделі (Models) — визначають схеми зберігання даних у MongoDB для сутностей: User, Client, Vehicle, Policy, Payment, Claim, TelemetryEvent, AuditLog, SystemSettings.
+* Middleware — реалізує перевірку токенів, контроль ролей, статус користувача (active/blocked) та аудит дій.
+Такий підхід дозволяє легко розширювати систему новими модулями, ізолювати бізнес-логіку від інфраструктурних змін і підтримувати високу тестованість коду.
+	3.3 Бізнес-логіка серверної частини
+	3.3.1 Оформлення та активація страхового поліса
+     Бізнес-логіка оформлення страхового поліса в системі AutoInsuranceServer реалізує повний життєвий цикл поліса — від створення до активації після оплати. На відміну від простого CRUD-додавання запису в базу даних, серверна частина забезпечує перевірку коректності вхідних даних, автоматичний розрахунок вартості страхування та контроль зміни статусів поліса.
+     Під час створення нового поліса сервер встановлює початковий статус Draft, що означає незавершений процес оформлення. Фінальна вартість страхового поліса (final_premium) не передається клієнтом напряму, а обчислюється на сервері на основі базової вартості (base_premium) та тарифного плану. Це унеможливлює маніпуляцію даними з боку клієнтського застосунку.
+     Активація поліса відбувається лише після успішного виконання операції оплати. Після створення платежу зі статусом Paid сервер автоматично змінює статус відповідного поліса на Active та фіксує дату початку страхового покриття. Таким чином, бізнес-логіка гарантує, що активний страховий поліс завжди має підтверджений платіж.
+     Реалізація бізнес-логіки оформлення та активації страхового поліса виконана у сервісному шарі системи. Метод createPolicy відповідає за створення поліса зі статусом Draft та автоматичний розрахунок фінальної вартості страхування. Метод activatePolicy перевіряє наявність успішного платежу та змінює статус поліса на Active. Такий підхід забезпечує контроль життєвого циклу поліса на рівні серверної частини та виключає можливість активації без оплати.
+policyService.js
+const Policy = require('../models/Policy');
+const Payment = require('../models/Payment');
+
+exports.createPolicy = async (data) => {
+    const policy = new Policy({
+        ...data,
+        status: 'Draft',
+        final_premium: data.base_premium * getTariffCoeff(data.tariff_plan)
+    });
+    return policy.save();
+};
+
+exports.activatePolicy = async (policyId) => {
+    const payment = await Payment.findOne({ policy_id: policyId, status: 'Paid' });
+    if (!payment) {
+        throw new Error('Policy cannot be activated without payment');
+    }
+
+    return Policy.findByIdAndUpdate(
+        policyId,
+        { status: 'Active', start_date: new Date() },
+        { new: true }
+    );
+};
+
+
+policyController.js
+const policyService = require('../services/policyService');
+
+exports.createPolicy = async (req, res) => {
+    try {
+        const policy = await policyService.createPolicy(req.body);
+        res.status(201).json(policy);
+    } catch (err) {
+        res.status(400).json({ message: err.message });
+    }
+};
+
+     Процес оформлення та активації страхового поліса детально відображено на UML-діаграмі діяльності (див. розділ 3.5, рисунок 3.1).
+     
+     3.3.2 Обробка страхових випадків
+     Бізнес-логіка обробки страхових випадків реалізує контроль життєвого циклу звернення від моменту реєстрації до прийняття рішення та виплати. На серверній частині запроваджено послідовність статусів: Created ? InReview ? Approved/Rejected ? Paid. Створення звернення доступне клієнту за умови, що страховий поліс активний на момент події (перевірка статусу поліса та діапазону start_date/end_date). Додатково перевіряється, що звернення подає власник поліса.
+     Операції register і decision виконуються з урахуванням правил предметної області: звернення може бути взяте в роботу лише зі статусу Created, після чого призначається обробник (користувач із роллю Manager) і встановлюється статус InReview. Прийняття рішення дозволено лише обробнику звернення та лише зі статусу InReview. У разі схвалення виплати додатково контролюється коректність суми approved_payout (невід’ємність та узгодженість із оцінкою збитків estimated_damage). Перехід у статус Paid можливий лише після статусу Approved. Такий підхід гарантує коректні переходи станів та унеможливлює неконсистентні зміни даних.
+     Реалізація бізнес-логіки обробки страхових випадків винесена у сервісний шар claimService. Контролер claimController відповідає за прийом HTTP-запитів та формування відповідей, а всі перевірки статусів, ролей і бізнес-правил виконуються на рівні сервісу.
+claimService.js
+const Claim = require('../models/Claim')
+const Policy = require('../models/Policy')
+const User = require('../models/User')
+
+const httpError = (status, message) => {
+    const err = new Error(message)
+    err.status = status
+    return err
+}
+
+const getNextClaimId = async () => {
+    const last = await Claim.findOne({}).sort({ claim_id: -1 }).lean()
+    return last ? last.claim_id + 1 : 1
+}
+
+const ensureManager = async (managerUserId) => {
+    const manager = await User.findOne({ user_id: managerUserId }).lean()
+    if (!manager) throw httpError(404, 'Manager user not found')
+    if (manager.role !== 'Manager') throw httpError(403, 'Only Manager can perform this action')
+    return manager
+}
+
+exports.createClaim = async (data) => {
+    const {
+        policy_id,
+        reported_by_client_id,
+        event_time,
+        location_lat,
+        location_lng,
+        description,
+        estimated_damage
+    } = data
+
+    if (!policy_id || !reported_by_client_id || !event_time || !description) {
+        throw httpError(400, 'Required fields: policy_id, reported_by_client_id, event_time, description')
+    }
+
+    const policy = await Policy.findOne({ policy_id }).lean()
+    if (!policy) throw httpError(404, 'Policy not found')
+
+    if (policy.client_id !== Number(reported_by_client_id)) {
+        throw httpError(403, 'Client is not owner of this policy')
+    }
+
+    const evTime = new Date(event_time)
+    if (Number.isNaN(evTime.getTime())) throw httpError(400, 'Invalid event_time')
+
+    if (policy.status !== 'Active') throw httpError(400, 'Policy must be Active to create a claim')
+    if (evTime < new Date(policy.start_date) || evTime > new Date(policy.end_date)) {
+        throw httpError(400, 'Event time is outside policy coverage period')
+    }
+
+    const claim_id = await getNextClaimId()
+
+    const claim = await Claim.create({
+        claim_id,
+        policy_id: Number(policy_id),
+        reported_by_client_id: Number(reported_by_client_id),
+        handler_user_id: null,
+        event_time: evTime,
+        location_lat,
+        location_lng,
+        description,
+        status: 'Created',
+        estimated_damage
+    })
+
+    return claim
+}
+
+exports.registerClaim = async (claimId, managerUserId) => {
+    await ensureManager(managerUserId)
+
+    const claim = await Claim.findOne({ claim_id: claimId })
+    if (!claim) throw httpError(404, 'Claim not found')
+
+    if (claim.status !== 'Created') {
+        throw httpError(400, 'Only claims with status Created can be registered')
+    }
+
+    claim.handler_user_id = Number(managerUserId)
+    claim.status = 'InReview'
+    await claim.save()
+
+    return claim
+}
+
+exports.decideClaim = async (claimId, managerUserId, decision, approved_payout) => {
+    await ensureManager(managerUserId)
+
+    const claim = await Claim.findOne({ claim_id: claimId })
+    if (!claim) throw httpError(404, 'Claim not found')
+
+    if (claim.status !== 'InReview') {
+        throw httpError(400, 'Decision is allowed only for InReview claims')
+    }
+
+    if (claim.handler_user_id !== Number(managerUserId)) {
+        throw httpError(403, 'Only claim handler can make a decision')
+    }
+
+    if (decision !== 'Approved' && decision !== 'Rejected') {
+        throw httpError(400, "decision must be 'Approved' or 'Rejected'")
+    }
+
+    if (decision === 'Approved') {
+        const payout = Number(approved_payout)
+        if (!Number.isFinite(payout) || payout < 0) throw httpError(400, 'Invalid approved_payout')
+
+        if (Number.isFinite(claim.estimated_damage) && payout > Number(claim.estimated_damage)) {
+            throw httpError(400, 'approved_payout cannot exceed estimated_damage')
+        }
+
+        claim.approved_payout = payout
+        claim.status = 'Approved'
+    } else {
+        claim.approved_payout = undefined
+        claim.status = 'Rejected'
+    }
+
+    await claim.save()
+    return claim
+}
+
+exports.payClaim = async (claimId, managerUserId) => {
+    await ensureManager(managerUserId)
+
+    const claim = await Claim.findOne({ claim_id: claimId })
+    if (!claim) throw httpError(404, 'Claim not found')
+
+    if (claim.status !== 'Approved') {
+        throw httpError(400, 'Only Approved claim can be paid')
+    }
+
+    if (claim.handler_user_id !== Number(managerUserId)) {
+        throw httpError(403, 'Only claim handler can mark claim as Paid')
+    }
+
+    claim.status = 'Paid'
+    await claim.save()
+
+    return claim
+}
+
+claimController.js
+const claimService = require('../services/claimService')
+
+exports.createClaim = async (req, res) => {
+    try {
+        const claim = await claimService.createClaim(req.body)
+        res.status(201).json(claim)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+exports.registerClaim = async (req, res) => {
+    try {
+        const claimId = Number(req.params.id)
+        const { manager_user_id } = req.body
+
+        const claim = await claimService.registerClaim(claimId, Number(manager_user_id))
+        res.json(claim)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+exports.decideClaim = async (req, res) => {
+    try {
+        const claimId = Number(req.params.id)
+        const { manager_user_id, decision, approved_payout } = req.body
+
+        const claim = await claimService.decideClaim(
+            claimId,
+            Number(manager_user_id),
+            decision,
+            approved_payout
+        )
+
+        res.json(claim)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+exports.payClaim = async (req, res) => {
+    try {
+        const claimId = Number(req.params.id)
+        const { manager_user_id } = req.body
+
+        const claim = await claimService.payClaim(claimId, Number(manager_user_id))
+        res.json(claim)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+     Процес обробки страхового випадку відображено на UML-діаграмі діяльності та UML-діаграмі взаємодії (рис. 3.2 – 3.3).
+     
+     3.3.3 Телеметрія та автоматичне визначення критичних подій
+     Бізнес-логіка обробки телеметричних подій у системі AutoInsuranceServer забезпечує не лише збереження показників транспортного засобу, а й автоматичну класифікацію подій за рівнем критичності. Подія вважається критичною, якщо зафіксовано удар (impact_flag = true) та швидкість транспортного засобу перевищує порогове значення. Порогове значення зберігається в системних налаштуваннях і може змінюватися адміністративними функціями, що дозволяє адаптувати критерії критичності без змін у коді.
+     Під час надходження телеметрії сервер перевіряє коректність обов’язкових полів, зберігає запис у базі даних та встановлює поле severity зі значенням critical або normal. У подальшому ці дані можуть використовуватися менеджером під час аналізу страхового випадку, зокрема для перегляду телеметрії в момент ДТП.
+     Реалізація бізнес-правил класифікації телеметрії винесена до сервісного шару telemetryService. Контролер telemetryController відповідає за прийом HTTP-запитів і повернення результатів, тоді як рішення про критичність та використання порогових налаштувань виконується в сервісі.
+telemetryService.js
+const TelemetryEvent = require('../models/TelemetryEvent')
+const SystemSettings = require('../models/SystemSettings')
+
+const httpError = (status, message) => {
+    const err = new Error(message)
+    err.status = status
+    return err
+}
+
+const getImpactSpeedThreshold = async () => {
+    const row = await SystemSettings.findOne({ key: 'impactSpeedThreshold' }).lean()
+    if (row && Number.isFinite(row.valueNumber)) return row.valueNumber
+    return 30
+}
+
+const getNextEventId = async () => {
+    const last = await TelemetryEvent.findOne({}).sort({ event_id: -1 }).lean()
+    return last ? last.event_id + 1 : 1
+}
+
+exports.createTelemetryEvent = async (data) => {
+    const {
+        event_id,
+        vehicle_id,
+        timestamp,
+        speed,
+        engine_rpm,
+        acceleration,
+        braking_flag,
+        impact_flag,
+        latitude,
+        longitude
+    } = data
+
+    if (!vehicle_id || !timestamp) {
+        throw httpError(400, 'Required fields: vehicle_id, timestamp')
+    }
+
+    const ts = new Date(timestamp)
+    if (Number.isNaN(ts.getTime())) throw httpError(400, 'Invalid timestamp')
+
+    const threshold = await getImpactSpeedThreshold()
+    const speedNum = Number(speed || 0)
+
+    const severity =
+        impact_flag === true && speedNum >= threshold
+            ? 'critical'
+            : 'normal'
+
+    const finalEventId = Number.isFinite(Number(event_id))
+        ? Number(event_id)
+        : await getNextEventId()
+
+    const event = await TelemetryEvent.create({
+        event_id: finalEventId,
+        vehicle_id: Number(vehicle_id),
+        timestamp: ts,
+        speed,
+        engine_rpm,
+        acceleration,
+        braking_flag,
+        impact_flag,
+        severity,
+        latitude,
+        longitude
+    })
+
+    return event
+}
+
+telemetryController.js
+const telemetryService = require('../services/telemetryService')
+
+exports.createTelemetryEvent = async (req, res) => {
+    try {
+        const event = await telemetryService.createTelemetryEvent(req.body)
+        res.status(201).json(event)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+TelemetryEvent.js
+Додано
+severity: { type: String, enum: ['normal', 'critical'], default: 'normal' },
+
+SystemSettings.js
+const mongoose = require('mongoose')
+
+const SystemSettingsSchema = new mongoose.Schema(
+    {
+        key: { type: String, required: true, unique: true },
+        valueNumber: { type: Number, default: null },
+        valueString: { type: String, default: null },
+        updated_at: { type: Date, default: Date.now }
+    },
+    { collection: 'system_settings' }
+)
+
+SystemSettingsSchema.pre('save', function (next) {
+    this.updated_at = new Date()
+    next()
+})
+
+module.exports = mongoose.model('SystemSettings', SystemSettingsSchema)
+
+Процес обробки телеметричних подій відображено на UML-діаграмі діяльності (рис. 3.4).
+
+	3.4 Адміністрування
+	3.4.1 Управління користувачами та ролями
+     Функції адміністрування користувачів у системі AutoInsuranceServer забезпечують керування обліковими записами та ролями доступу. Адміністратор може змінювати роль користувача, а також блокувати або розблоковувати доступ до системи. Під час блокування користувач не видаляється з бази даних, а переводиться у неактивний стан (isActive = false), що дозволяє зберігати історію операцій та пов’язані дані (поліси, платежі, звернення).
+     Додатково критичні адміністративні дії журналюються в системному журналі (AuditLog). Це дає змогу відстежувати хто і коли виконав блокування або зміну ролі, а також забезпечує основу для контролю доступу і аналізу активності.
+     Адміністративні операції реалізовані в adminService та adminController. Сервісний шар виконує бізнес-перевірки (наявність користувача, заборона блокування самого себе, перевірка ролі адміністратора), а контролер відповідає за обробку HTTP-запитів та формування відповідей.
+adminService.js
+const User = require('../models/User')
+const AuditLog = require('../models/AuditLog')
+
+const httpError = (status, message) => {
+    const err = new Error(message)
+    err.status = status
+    return err
+}
+
+const ensureAdmin = async (actorUserId) => {
+    const actor = await User.findOne({ user_id: actorUserId }).lean()
+    if (!actor) throw httpError(404, 'Admin user not found')
+    if (actor.role !== 'Admin') throw httpError(403, 'Only Admin can perform this action')
+    return actor
+}
+
+const writeAudit = async ({ action, actor_user_id, target_user_id, details }) => {
+    await AuditLog.create({
+        action,
+        actor_user_id,
+        target_user_id: target_user_id ?? null,
+        details: details || {}
+    })
+}
+
+exports.changeUserRole = async (targetUserId, actorUserId, newRole) => {
+    await ensureAdmin(actorUserId)
+
+    const allowed = ['Admin', 'Manager', 'Agent', 'Driver']
+    if (!allowed.includes(newRole)) throw httpError(400, 'Invalid role')
+
+    const target = await User.findOne({ user_id: targetUserId })
+    if (!target) throw httpError(404, 'Target user not found')
+
+    target.role = newRole
+    await target.save()
+
+    await writeAudit({
+        action: 'CHANGE_ROLE',
+        actor_user_id: Number(actorUserId),
+        target_user_id: Number(targetUserId),
+        details: { newRole }
+    })
+
+    return target
+}
+
+exports.blockUser = async (targetUserId, actorUserId) => {
+    await ensureAdmin(actorUserId)
+
+    if (Number(targetUserId) === Number(actorUserId)) {
+        throw httpError(400, 'Admin cannot block himself')
+    }
+
+    const target = await User.findOne({ user_id: targetUserId })
+    if (!target) throw httpError(404, 'Target user not found')
+
+    if (target.isActive === false) return target
+
+    target.isActive = false
+    await target.save()
+
+    await writeAudit({
+        action: 'BLOCK_USER',
+        actor_user_id: Number(actorUserId),
+        target_user_id: Number(targetUserId)
+    })
+
+    return target
+}
+
+exports.unblockUser = async (targetUserId, actorUserId) => {
+    await ensureAdmin(actorUserId)
+
+    const target = await User.findOne({ user_id: targetUserId })
+    if (!target) throw httpError(404, 'Target user not found')
+
+    if (target.isActive === true) return target
+
+    target.isActive = true
+    await target.save()
+
+    await writeAudit({
+        action: 'UNBLOCK_USER',
+        actor_user_id: Number(actorUserId),
+        target_user_id: Number(targetUserId)
+    })
+
+    return target
+}
+
+exports.getAuditLogs = async (actorUserId, limit = 50) => {
+    await ensureAdmin(actorUserId)
+    return AuditLog.find({})
+        .sort({ created_at: -1 })
+        .limit(Number(limit))
+        .lean()
+}
+
+adminController.js
+const adminService = require('../services/adminService')
+
+exports.changeUserRole = async (req, res) => {
+    try {
+        const targetUserId = Number(req.params.id)
+        const { actor_user_id, role } = req.body
+
+        const user = await adminService.changeUserRole(targetUserId, Number(actor_user_id), role)
+        res.json(user)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+exports.blockUser = async (req, res) => {
+    try {
+        const targetUserId = Number(req.params.id)
+        const { actor_user_id } = req.body
+
+        const user = await adminService.blockUser(targetUserId, Number(actor_user_id))
+        res.json(user)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+exports.unblockUser = async (req, res) => {
+    try {
+        const targetUserId = Number(req.params.id)
+        const { actor_user_id } = req.body
+
+        const user = await adminService.unblockUser(targetUserId, Number(actor_user_id))
+        res.json(user)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+exports.getAuditLogs = async (req, res) => {
+    try {
+        const actorUserId = Number(req.query.actor_user_id)
+        const limit = Number(req.query.limit || 50)
+
+        const logs = await adminService.getAuditLogs(actorUserId, limit)
+        res.json(logs)
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+AuditLog.js
+const mongoose = require('mongoose')
+
+const AuditLogSchema = new mongoose.Schema(
+    {
+        action: { type: String, required: true },
+        actor_user_id: { type: Number, required: true },
+        target_user_id: { type: Number, default: null },
+        details: { type: Object, default: {} },
+        created_at: { type: Date, default: Date.now }
+    },
+    { collection: 'audit_logs' }
+)
+
+module.exports = mongoose.model('AuditLog', AuditLogSchema)
+
+     Журналювання адміністративних дій реалізовано через AuditLog та використовується як підхід аудиту подій у системі.
+	3.4.2 Налаштування системних параметрів
+     Функції адміністрування системних параметрів у AutoInsuranceServer забезпечують зміну налаштувань без правок у програмному коді. Адміністратор може оновлювати порогові значення та тарифні коефіцієнти, які використовуються в бізнес-логіці. Зокрема, параметр impactSpeedThreshold застосовується для класифікації телеметричних подій як критичних, а збережені параметри використовуються модулями Policy та Telemetry під час створення страхового поліса.
+     Збереження налаштувань реалізовано в колекції system_settings у вигляді пар key ? value. Це дозволяє розширювати набір параметрів (додавати нові ключі) без зміни структури основних сутностей.
+     Оновлення тарифів реалізовано через ендпоінт PUT /api/admin/tariffs, який доступний лише адміністратору. Сервісний шар виконує перевірку прав доступу та зберігає параметри в базі даних, після чого бізнес-логіка (Policy/Telemetry) використовує актуальні значення.
+     Ендпоінт PUT /api/admin/tariffs зберігає параметри у колекції system_settings (upsert за ключем), після чого ці значення використовуються в бізнес-логіці системи. Коефіцієнти cascoCoeff та oscpvCoeff застосовуються під час розрахунку final_premium при створенні поліса, а параметр impactSpeedThreshold використовується для визначення критичності телеметричних подій (severity).
+adminService.updateTariffs
+exports.updateTariffs = async (actorUserId, payload) => {
+    await ensureAdmin(actorUserId)
+
+    const setNumber = async (key, value) => {
+        const num = Number(value)
+        if (!Number.isFinite(num)) throw httpError(400, `Invalid number for ${key}`)
+
+        return SystemSettings.findOneAndUpdate(
+            { key },
+            { key, valueNumber: num, valueString: null },
+            { upsert: true, new: true }
+        )
+    }
+
+    const updated = []
+
+    if (payload.impactSpeedThreshold !== undefined) {
+        updated.push(await setNumber('impactSpeedThreshold', payload.impactSpeedThreshold))
+    }
+
+    if (payload.cascoCoeff !== undefined) {
+        updated.push(await setNumber('cascoCoeff', payload.cascoCoeff))
+    }
+
+    if (payload.oscpvCoeff !== undefined) {
+        updated.push(await setNumber('oscpvCoeff', payload.oscpvCoeff))
+    }
+
+    await writeAudit({
+        action: 'UPDATE_TARIFFS',
+        actor_user_id: Number(actorUserId),
+        target_user_id: null,
+        details: {
+            updatedKeys: updated.map(x => x.key)
+        }
+    })
+
+    return updated
+}
+
+adminController.updateTariffs
+exports.updateTariffs = async (req, res) => {
+    try {
+        const { actor_user_id, impactSpeedThreshold, cascoCoeff, oscpvCoeff } = req.body
+
+        const updated = await adminService.updateTariffs(
+            Number(actor_user_id),
+            { impactSpeedThreshold, cascoCoeff, oscpvCoeff }
+        )
+
+        res.json({ message: 'Tariffs/settings updated', updated })
+    } catch (err) {
+        res.status(err.status || 500).json({ message: err.message })
+    }
+}
+
+Збереження налаштувань у колекції system_settings
+const mongoose = require('mongoose')
+
+const SystemSettingsSchema = new mongoose.Schema(
+    {
+        key: { type: String, required: true, unique: true },
+        valueNumber: { type: Number, default: null },
+        valueString: { type: String, default: null },
+        updated_at: { type: Date, default: Date.now }
+    },
+    { collection: 'system_settings' }
+)
+
+SystemSettingsSchema.pre('save', function (next) {
+    this.updated_at = new Date()
+    next()
+})
+
+module.exports = mongoose.model('SystemSettings', SystemSettingsSchema)
+
+policyService.js
+const Policy = require('../models/Policy')
+const Payment = require('../models/Payment')
+const SystemSettings = require('../models/SystemSettings')
+
+const getTariffCoeff = async (plan) => {
+    if (plan === 'CASCO') {
+        const row = await SystemSettings.findOne({ key: 'cascoCoeff' }).lean()
+        return row && Number.isFinite(row.valueNumber) ? row.valueNumber : 1.5
+    }
+
+    const row = await SystemSettings.findOne({ key: 'oscpvCoeff' }).lean()
+    return row && Number.isFinite(row.valueNumber) ? row.valueNumber : 1.0
+}
+
+exports.createPolicy = async (data) => {
+    const coeff = await getTariffCoeff(data.tariff_plan)
+
+    const policy = new Policy({
+        ...data,
+        status: 'Draft',
+        final_premium: data.base_premium * coeff
+    })
+
+    return policy.save()
+}
+
+exports.activatePolicy = async (policyId) => {
+    const payment = await Payment.findOne({ policy_id: policyId, status: 'Paid' })
+    if (!payment) {
+        throw new Error('Policy cannot be activated without payment')
+    }
+
+    return Policy.findByIdAndUpdate(
+        policyId,
+        { status: 'Active', start_date: new Date() },
+        { new: true }
+    )
+}
+
+     Операції оновлення налаштувань фіксуються в журналі AuditLog.
+	3.5 UML-діаграми діяльності та взаємодії
+
+Рисунок 3.1 – UML-діаграма діяльності процесу створення та активації поліса
+
+Рисунок 3.2 – UML-діаграма діяльності процесу обробки страхового випадку
+
+Рисунок 3.3 – UML-діаграма взаємодії прийняття рішення по Claim та журналювання
+
+Рисунок 3.4 – UML-діаграма діяльності обробки телеметрії та визначення критичності
+ДОДАТОК А
+Посилання на відео: https://youtu.be/YzicV_G4DG0 
+Посилання на гітхаб: https://github.com/NureTymbotaHlib/ark-pzpi-23-7-tymbota-hlib.git 
+
